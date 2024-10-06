@@ -1,10 +1,12 @@
+use actix_web::{web, App, HttpServer, Responder, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
-use std::io::{self, BufRead, Read};
+use std::io::{self, BufRead};
 use std::path::Path;
+use std::sync::Mutex;
 use flate2::read::GzDecoder;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -53,7 +55,7 @@ struct GeneDetail {
     end: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 struct Node {
     name: String,
     x_dist: f64,
@@ -67,7 +69,21 @@ struct Node {
     meta: HashMap<String, Value>,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+struct AppState {
+    nodes: Mutex<HashMap<i32, Node>>,
+}
+
+async fn get_node(data: web::Data<AppState>, node_id: web::Path<i32>) -> Result<impl Responder> {
+    let nodes = data.nodes.lock().unwrap();
+    if let Some(node) = nodes.get(&node_id) {
+        Ok(web::Json(node.clone()))
+    } else {
+        Err(actix_web::error::ErrorNotFound("Node not found"))
+    }
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         println!("Usage: {} <path_to_jsonl_file>", args[0]);
@@ -75,7 +91,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let path = Path::new(&args[1]);
-    let file = File::open(&path)?;
+    let file = File::open(&path).expect("Failed to open file");
 
     let reader: Box<dyn BufRead> = if path.extension().and_then(|s| s.to_str()) == Some("gz") {
         Box::new(io::BufReader::new(GzDecoder::new(file)))
@@ -86,87 +102,30 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut lines = reader.lines();
 
     // Read the first line separately as metadata
-    let metadata_line = lines.next().ok_or("Empty file")??;
-    let metadata: Metadata = serde_json::from_str(&metadata_line)?;
+    let metadata_line = lines.next().expect("Empty file").expect("Failed to read metadata");
+    let _metadata: Metadata = serde_json::from_str(&metadata_line).expect("Failed to parse metadata");
 
-    println!("Metadata:");
-    println!("Version: {}", metadata.version);
-    println!("Total nodes: {}", metadata.total_nodes);
-    println!("Number of tips: {}", metadata.config.num_tips);
-    println!("Number of mutations: {}", metadata.mutations.len());
-
-    // Count AA and NT mutations
-    let mut aa_mutations = 0;
-    let mut nt_mutations = 0;
-    for mutation in &metadata.mutations {
-        match mutation {
-            Mutation::AA { .. } => aa_mutations += 1,
-            Mutation::NT { .. } => nt_mutations += 1,
-        }
-    }
-    println!("Number of AA mutations: {}", aa_mutations);
-    println!("Number of NT mutations: {}", nt_mutations);
-
-    // Read the second line to determine dynamic fields
-    let second_line = lines.next().ok_or("Missing second line")??;
-    let sample_node: Node = serde_json::from_str(&second_line)?;
-    let dynamic_fields: Vec<String> = sample_node.meta.keys()
-        .filter(|&k| k.starts_with("meta_"))
-        .cloned()
-        .collect();
-
-    println!("\nDynamic meta fields:");
-    for field in &dynamic_fields {
-        println!("  {}", field);
-    }
+    let mut nodes = HashMap::new();
 
     // Process nodes
-    let mut total_nodes = 1; // Count the sample node
-    let mut total_mutations = sample_node.mutations.len();
-    let mut max_x_dist = sample_node.x_dist;
-    let mut min_x_dist = sample_node.x_dist;
-    let mut sum_num_tips = sample_node.num_tips as f64;
-    let mut root_node_id = if sample_node.parent_id == sample_node.node_id {
-        Some(sample_node.node_id)
-    } else {
-        None
-    };
-
-    // Process remaining lines
     for line in lines {
-        let line = line?;
-        let node: Node = serde_json::from_str(&line)?;
-        
-        total_nodes += 1;
-        total_mutations += node.mutations.len();
-        max_x_dist = max_x_dist.max(node.x_dist);
-        min_x_dist = min_x_dist.min(node.x_dist);
-        sum_num_tips += node.num_tips as f64;
-
-        if node.parent_id == node.node_id {
-            root_node_id = Some(node.node_id);
-        }
+        let line = line.expect("Failed to read line");
+        let node: Node = serde_json::from_str(&line).expect("Failed to parse node");
+        nodes.insert(node.node_id, node);
     }
 
-    println!("\nNode Data Analysis:");
-    println!("Total nodes: {}", total_nodes);
-    println!("Total mutations in nodes: {}", total_mutations);
-    println!("Max x_dist: {}", max_x_dist);
-    println!("Min x_dist: {}", min_x_dist);
+    let app_state = web::Data::new(AppState {
+        nodes: Mutex::new(nodes),
+    });
 
-    // Calculate average number of tips per node
-    let avg_num_tips = sum_num_tips / total_nodes as f64;
-    println!("Average number of tips per node: {:.2}", avg_num_tips);
+    println!("Starting server at http://localhost:8080");
 
-    // Print sample data for dynamic fields
-    if !dynamic_fields.is_empty() {
-        println!("\nSample data for dynamic fields (from the second line):");
-        for field in &dynamic_fields {
-            if let Some(value) = sample_node.meta.get(field) {
-                println!("  {}: {}", field, value);
-            }
-        }
-    }
-
-    Ok(())
+    HttpServer::new(move || {
+        App::new()
+            .app_data(app_state.clone())
+            .route("/node/{node_id}", web::get().to(get_node))
+    })
+    .bind("127.0.0.1:8080")?
+    .run()
+    .await
 }
