@@ -100,6 +100,7 @@ fn load_data(path: &Path) -> Result<(Metadata, HashMap<i32, Node>), Box<dyn Erro
     Ok((metadata, nodes))
 }
 
+#[get("/node/{node_id}")]
 async fn get_node(data: web::Data<AppState>, node_id: web::Path<i32>) -> Result<impl Responder> {
     let nodes = data.nodes.lock().unwrap();
     if let Some(node) = nodes.get(&node_id) {
@@ -110,8 +111,8 @@ async fn get_node(data: web::Data<AppState>, node_id: web::Path<i32>) -> Result<
 }
 
 #[get("/")]
-async fn index(data: web::Data<AppState>) -> String {
-    format!("Hello world!") // <- response with app_name
+async fn index(_data: web::Data<AppState>) -> String {
+    "Hello world!".to_string()
 }
 
 #[actix_web::main]
@@ -124,7 +125,7 @@ async fn main() -> std::io::Result<()> {
 
     let path = Path::new(&args[1]);
     
-    let (metadata, nodes) = load_data(path).expect("Failed to load data");
+    let (_metadata, nodes) = load_data(path).expect("Failed to load data");
 
     let app_state = web::Data::new(AppState {
         nodes: Mutex::new(nodes),
@@ -136,11 +137,10 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(app_state.clone())
             .service(index)
-            
-            .route("/node/{node_id}", web::get().to(get_node))
+            .service(get_node)
     })
-    .disable_signals()
     .bind(("127.0.0.1", 8080))?
+    .disable_signals()
     .run()
     .await
 }
