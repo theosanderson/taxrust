@@ -262,9 +262,7 @@ fn add_parents(all_nodes: &HashMap<i32, Node>, filtered: Vec<&Node>) -> Vec<Node
     let mut to_process: Vec<i32> = selected_node_ids.iter().cloned().collect();
     while let Some(node_id) = to_process.pop() {
         if let Some(node) = all_nodes.get(&node_id) {
-            println!("Processing node: {}", node_id);
-            println!("Parent: {}", node.parent_id);
-            println!("Node: {:?}", node);
+          
             let parent_id = node.parent_id;
             if parent_id != node_id && !selected_node_ids.contains(&parent_id) {
                 selected_node_ids.insert(parent_id);
@@ -272,7 +270,7 @@ fn add_parents(all_nodes: &HashMap<i32, Node>, filtered: Vec<&Node>) -> Vec<Node
             }
         }
     }
-    println!("Selected: {:?}", selected_node_ids);
+    //println!("Selected: {:?}", selected_node_ids);
     let result: Vec<Node> = all_nodes.values().filter(|n| selected_node_ids.contains(&n.node_id)).cloned().collect();
     
     println!("After: {}", result.len());
