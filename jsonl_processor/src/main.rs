@@ -9,10 +9,9 @@ use std::fs::File;
 use std::io::Seek;
 use std::io::{self, BufRead};
 use std::path::Path;
-use std::sync::Mutex;
-use flate2::read::GzDecoder;
 use std::cmp::Ordering;
 use std::time::Instant;
+use flate2::read::GzDecoder;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct Metadata {
@@ -91,11 +90,11 @@ struct Node {
 }
 
 struct AppState {
-    nodes: Mutex<HashMap<i32, Node>>,
-    child_to_parent: Mutex<HashMap<i32, i32>>,
-    config: Mutex<Config>,
-    root_mutations: Mutex<Vec<i32>>,
-    root_id: Mutex<i32>,
+    nodes: Vec<Node>,
+    child_to_parent: HashMap<i32, i32>,
+    config: Config,
+    root_mutations: Vec<i32>,
+    root_id: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,7 +111,7 @@ struct NodesResponse {
     nodes: Vec<Node>,
 }
 
-fn load_data(path: &Path) -> Result<(Metadata, HashMap<i32, Node>, HashMap<i32, i32>, Vec<i32>, i32), Box<dyn Error>> {
+fn load_data(path: &Path) -> Result<(Metadata, Vec<Node>, HashMap<i32, i32>, Vec<i32>, i32), Box<dyn Error>> {
     let file = File::open(path)?;
 
     let reader: Box<dyn BufRead> = if path.extension().and_then(|s| s.to_str()) == Some("gz") {
@@ -127,7 +126,7 @@ fn load_data(path: &Path) -> Result<(Metadata, HashMap<i32, Node>, HashMap<i32, 
     let metadata_line = lines.next().ok_or("Empty file")??;
     let metadata: Metadata = serde_json::from_str(&metadata_line)?;
 
-    let mut nodes = HashMap::new();
+    let mut nodes = Vec::new();
     let mut child_to_parent = HashMap::new();
     let mut root_mutations = Vec::new();
     let mut root_id = 0;
@@ -146,28 +145,28 @@ fn load_data(path: &Path) -> Result<(Metadata, HashMap<i32, Node>, HashMap<i32, 
             child_to_parent.insert(node.node_id, node.parent_id);
         }
         
-        nodes.insert(node.node_id, node);
+        nodes.push(node);
     }
 
     Ok((metadata, nodes, child_to_parent, root_mutations, root_id))
 }
 
-fn scale_y_coordinates(nodes: &mut HashMap<i32, Node>) {
+fn scale_y_coordinates(nodes: &mut Vec<Node>) {
     let num_nodes = nodes.len();
     let scale_y = 24e2 / if num_nodes > 10000 { num_nodes as f64 } else { num_nodes as f64 * 0.6666 };
     
-    for node in nodes.values_mut() {
+    for node in nodes.iter_mut() {
         node.y = (node.y * scale_y * 1e6).round() / 1e6;  // Round to 6 decimal places
     }
 }
 
-fn calculate_extremes(nodes: &HashMap<i32, Node>) -> (f64, f64, f64, f64) {
+fn calculate_extremes(nodes: &[Node]) -> (f64, f64, f64, f64) {
     let mut min_y = f64::MAX;
     let mut max_y = f64::MIN;
     let mut min_x = f64::MAX;
     let mut max_x = f64::MIN;
 
-    for node in nodes.values() {
+    for node in nodes.iter() {
         min_y = min_y.min(node.y);
         max_y = max_y.max(node.y);
         min_x = min_x.min(node.x_dist);
@@ -177,7 +176,7 @@ fn calculate_extremes(nodes: &HashMap<i32, Node>) -> (f64, f64, f64, f64) {
     (min_y, max_y, min_x, max_x)
 }
 
-fn update_config(config: &mut Config, nodes: &HashMap<i32, Node>, root_mutations: &Vec<i32>, root_id: i32, mutations: Vec<Mutation>) {
+fn update_config(config: &mut Config, nodes: &[Node], root_mutations: &Vec<i32>, root_id: i32, mutations: Vec<Mutation>) {
     let (min_y, max_y, min_x, max_x) = calculate_extremes(nodes);
     config.initial_x = Some((max_x + min_x) / 2.0);
     config.initial_y = Some((max_y + min_y) / 2.0);
@@ -191,14 +190,12 @@ fn update_config(config: &mut Config, nodes: &HashMap<i32, Node>, root_mutations
 
 #[get("/config/")]
 async fn get_config(data: web::Data<AppState>) -> impl Responder {
-    let config = data.config.lock().unwrap();
-    HttpResponse::Ok().json(config.clone())
+    HttpResponse::Ok().json(&data.config)
 }
 
 #[get("/node/{node_id}")]
 async fn get_node(data: web::Data<AppState>, node_id: web::Path<i32>) -> Result<impl Responder> {
-    let nodes = data.nodes.lock().unwrap();
-    if let Some(node) = nodes.get(&node_id) {
+    if let Some(node) = data.nodes.iter().find(|&n| n.node_id == *node_id) {
         Ok(web::Json(node.clone()))
     } else {
         Err(actix_web::error::ErrorNotFound("Node not found"))
@@ -226,17 +223,13 @@ async fn get_nodes(
 ) -> impl Responder {
     let start_time = Instant::now();
 
-    let nodes = data.nodes.lock().unwrap();
-    let child_to_parent = data.child_to_parent.lock().unwrap();
     let lock_time = start_time.elapsed();
     println!("Time to acquire locks: {:?}", lock_time);
     
-    let config = data.config.lock().unwrap();
-    
-    let min_y = query.min_y.unwrap_or_else(|| nodes.values().map(|n| n.y).min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal)).unwrap_or(0.0));
-    let max_y = query.max_y.unwrap_or_else(|| nodes.values().map(|n| n.y).max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal)).unwrap_or(0.0));
-    let min_x = query.min_x.unwrap_or_else(|| nodes.values().map(|n| n.x_dist).min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal)).unwrap_or(0.0));
-    let max_x = query.max_x.unwrap_or_else(|| nodes.values().map(|n| n.x_dist).max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal)).unwrap_or(0.0));
+    let min_y = query.min_y.unwrap_or_else(|| data.nodes.iter().map(|n| n.y).min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal)).unwrap_or(0.0));
+    let max_y = query.max_y.unwrap_or_else(|| data.nodes.iter().map(|n| n.y).max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal)).unwrap_or(0.0));
+    let min_x = query.min_x.unwrap_or_else(|| data.nodes.iter().map(|n| n.x_dist).min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal)).unwrap_or(0.0));
+    let max_x = query.max_x.unwrap_or_else(|| data.nodes.iter().map(|n| n.x_dist).max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal)).unwrap_or(0.0));
     let x_type = query.x_type.as_deref().unwrap_or("x_dist");
 
     let query_time = start_time.elapsed() - lock_time;
@@ -245,34 +238,39 @@ async fn get_nodes(
     println!("min_y: {}, max_y: {}, min_x: {}, max_x: {}", min_y, max_y, min_x, max_x);
 
     let filter_start = Instant::now();
-    let filtered = filter_nodes(&nodes, min_y, max_y);
+    let filtered = filter_nodes(&data.nodes, min_y, max_y);
     let filter_time = filter_start.elapsed();
     println!("Time to filter nodes: {:?}", filter_time);
 
     let reduce_start = Instant::now();
     let reduced_leaves = reduce_overplotting(
-        filtered.into_iter().filter(|n| n.num_tips == 1).collect(),
+        filtered.into_iter().filter(|&idx| data.nodes[idx].num_tips == 1).collect(),
         get_precision(min_x, max_x),
         get_precision(min_y, max_y),
         x_type,
+        &data.nodes,
     );
     let reduce_time = reduce_start.elapsed();
     println!("Time to reduce overplotting: {:?}", reduce_time);
 
     let parents_start = Instant::now();
-    let result = add_parents(&nodes, &child_to_parent, reduced_leaves);
+    let result = add_parents(&data.nodes, &data.child_to_parent, reduced_leaves);
+   
     let parents_time = parents_start.elapsed();
     println!("Time to add parents: {:?}", parents_time);
 
     let total_time = start_time.elapsed();
     println!("Total time for /nodes/ endpoint: {:?}", total_time);
-
+    // return as real nodes not indexes
+    let result: Vec<Node> = result.iter().map(|&idx| data.nodes[idx].clone()).collect();
     HttpResponse::Ok().json(NodesResponse { nodes: result })
 }
 
-fn filter_nodes<'a>(nodes: &'a HashMap<i32, Node>, min_y: f64, max_y: f64) -> Vec<&'a Node> {
-    nodes.values()
-        .filter(|n| n.y >= min_y && n.y <= max_y)
+fn filter_nodes(nodes: &[Node], min_y: f64, max_y: f64) -> Vec<usize> {
+    nodes.iter()
+        .enumerate()
+        .filter(|(_, n)| n.y >= min_y && n.y <= max_y)
+        .map(|(idx, _)| idx)
         .collect()
 }
 
@@ -280,12 +278,13 @@ fn get_precision(min: f64, max: f64) -> f64 {
     2000.0 / (max - min)
 }
 
-fn reduce_overplotting<'a>(nodes: Vec<&'a Node>, precision_x: f64, precision_y: f64, x_type: &str) -> Vec<&'a Node> {
+fn reduce_overplotting(nodes: Vec<usize>, precision_x: f64, precision_y: f64, x_type: &str, all_nodes: &[Node]) -> Vec<usize> {
     println!("Precision: {}, {}", precision_x, precision_y);
     println!("Before: {}", nodes.len());
     let precision_x = precision_x / 5.0;
     let mut included_points = HashMap::new();
-    let result: Vec<&Node> = nodes.into_iter().filter(|node| {
+    let result: Vec<usize> = nodes.into_iter().filter(|&idx| {
+        let node = &all_nodes[idx];
         let x = if x_type == "x_dist" { node.x_dist } else { node.x_dist };
         let rounded_x = (x * precision_x).round() as i64;
         let rounded_y = (node.y * precision_y).round() as i64;
@@ -298,16 +297,14 @@ fn reduce_overplotting<'a>(nodes: Vec<&'a Node>, precision_x: f64, precision_y: 
     result
 }
 
-fn add_parents(all_nodes: &HashMap<i32, Node>, child_to_parent: &HashMap<i32, i32>, filtered: Vec<&Node>) -> Vec<Node> {
+fn add_parents(all_nodes: &[Node], child_to_parent: &HashMap<i32, i32>, filtered: Vec<usize>) -> Vec<usize> {
     let start = Instant::now();
     
-
-    let mut selected_node_ids: HashSet<i32> = filtered.iter().map(|n| n.node_id).collect();
+    let mut selected_node_ids: HashSet<i32> = filtered.iter().map(|&idx| all_nodes[idx].node_id).collect();
     let starting_size = selected_node_ids.len();
 
     let setup_time = start.elapsed();
    
-
     let processing_start = Instant::now();
     let mut to_process: Vec<i32> = selected_node_ids.iter().cloned().collect();
 
@@ -322,8 +319,10 @@ fn add_parents(all_nodes: &HashMap<i32, Node>, child_to_parent: &HashMap<i32, i3
     let processing_time = processing_start.elapsed();
    
     let result_start = Instant::now();
-    let result: Vec<Node> = selected_node_ids.iter()
-        .filter_map(|node_id| all_nodes.get(node_id).cloned())
+    let result: Vec<usize> = all_nodes.iter()
+        .enumerate()
+        .filter(|(_, node)| selected_node_ids.contains(&node.node_id))
+        .map(|(idx, _)| idx)
         .collect();
     let result_time = result_start.elapsed();
    
@@ -349,17 +348,16 @@ async fn main() -> std::io::Result<()> {
     scale_y_coordinates(&mut nodes);
     update_config(&mut metadata.config, &nodes, &root_mutations, root_id, metadata.mutations.clone());
     let app_state = web::Data::new(AppState {
-        nodes: Mutex::new(nodes),
-        child_to_parent: Mutex::new(child_to_parent),
-        config: Mutex::new(metadata.config),
-        root_mutations: Mutex::new(root_mutations),
-        root_id: Mutex::new(root_id),
+        nodes,
+        child_to_parent,
+        config: metadata.config,
+        root_mutations,
+        root_id,
     });
 
     println!("Starting server at http://localhost:8080");
 
     HttpServer::new(move || {
-        // Create a CORS middleware
         let cors = Cors::default()
             .allow_any_origin()
             .allow_any_method()
@@ -367,7 +365,7 @@ async fn main() -> std::io::Result<()> {
             .max_age(3600);
 
         App::new()
-            .wrap(cors)  // Wrap the entire application with CORS middleware
+            .wrap(cors)
             .app_data(app_state.clone())
             .service(index)
             .service(get_node)
