@@ -1,5 +1,7 @@
 use actix_web::{web, App, HttpServer, Responder, Result, get, HttpResponse};
+use actix_cors::Cors;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -46,6 +48,8 @@ enum Mutation {
 struct Config {
     gene_details: HashMap<String, GeneDetail>,
     num_tips: usize,
+    #[serde(default)]
+    mutations: Vec<Mutation>,
     #[serde(default)]
     initial_x: Option<f64>,
     #[serde(default)]
@@ -165,7 +169,7 @@ fn calculate_extremes(nodes: &HashMap<i32, Node>) -> (f64, f64, f64, f64) {
     (min_y, max_y, min_x, max_x)
 }
 
-fn update_config(config: &mut Config, nodes: &HashMap<i32, Node>, root_mutations: &Vec<i32>, root_id: i32) {
+fn update_config(config: &mut Config, nodes: &HashMap<i32, Node>, root_mutations: &Vec<i32>, root_id: i32, mutations: Vec<Mutation>) {
     let (min_y, max_y, min_x, max_x) = calculate_extremes(nodes);
     config.initial_x = Some((max_x + min_x) / 2.0);
     config.initial_y = Some((max_y + min_y) / 2.0);
@@ -173,9 +177,10 @@ fn update_config(config: &mut Config, nodes: &HashMap<i32, Node>, root_mutations
     config.num_nodes = Some(nodes.len());
     config.root_mutations = Some(root_mutations.clone());
     config.root_id = Some(root_id);
+    config.mutations = mutations;
 }
 
-#[get("/config")]
+#[get("/config/")]
 async fn get_config(data: web::Data<AppState>) -> impl Responder {
     let config = data.config.lock().unwrap();
     HttpResponse::Ok().json(config.clone())
@@ -195,8 +200,16 @@ async fn get_node(data: web::Data<AppState>, node_id: web::Path<i32>) -> Result<
 async fn index(_data: web::Data<AppState>) -> String {
     "Hello world!".to_string()
 }
+#[get("/search/")]
+async fn search(_data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(json!({
+        "type": "complete",
+        "data": [],
+        "total_count": 0
+    }))
+}
 
-#[get("/nodes")]
+#[get("/nodes/")]
 async fn get_nodes(
     data: web::Data<AppState>,
     query: web::Query<NodesQuery>,
@@ -291,8 +304,7 @@ async fn main() -> std::io::Result<()> {
     let (mut metadata, mut nodes, root_mutations, root_id) = load_data(path).expect("Failed to load data");
 
     scale_y_coordinates(&mut nodes);
-    update_config(&mut metadata.config, &nodes, &root_mutations, root_id);
-
+    update_config(&mut metadata.config, &nodes, &root_mutations, root_id, metadata.mutations.clone());
     let app_state = web::Data::new(AppState {
         nodes: Mutex::new(nodes),
         config: Mutex::new(metadata.config),
@@ -303,12 +315,21 @@ async fn main() -> std::io::Result<()> {
     println!("Starting server at http://localhost:8080");
 
     HttpServer::new(move || {
+        // Create a CORS middleware
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header()
+            .max_age(3600);
+
         App::new()
+            .wrap(cors)  // Wrap the entire application with CORS middleware
             .app_data(app_state.clone())
             .service(index)
             .service(get_node)
             .service(get_nodes)
             .service(get_config)
+            .service(search)
     })
     .bind(("127.0.0.1", 8080))?
     .disable_signals()
