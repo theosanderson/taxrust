@@ -57,6 +57,8 @@ struct Config {
     #[serde(default)]
     initial_zoom: Option<f64>,
     #[serde(default)]
+    keys_to_display: Option<Vec<String>>,
+    #[serde(default)]
     num_nodes: Option<usize>,
     #[serde(default)]
     root_mutations: Option<Vec<i32>>,
@@ -178,6 +180,7 @@ fn update_config(config: &mut Config, nodes: &HashMap<i32, Node>, root_mutations
     config.root_mutations = Some(root_mutations.clone());
     config.root_id = Some(root_id);
     config.mutations = mutations;
+    config.keys_to_display = Some(vec!["name".to_string(), "num_tips".to_string()]);
 }
 
 #[get("/config/")]
