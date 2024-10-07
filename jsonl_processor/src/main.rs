@@ -301,12 +301,12 @@ fn reduce_overplotting<'a>(nodes: Vec<&'a Node>, precision_x: f64, precision_y: 
 fn add_parents(all_nodes: &HashMap<i32, Node>, child_to_parent: &HashMap<i32, i32>, filtered: Vec<&Node>) -> Vec<Node> {
     let start = Instant::now();
     
-    println!("Before: {}", filtered.len());
+
     let mut selected_node_ids: HashSet<i32> = filtered.iter().map(|n| n.node_id).collect();
     let starting_size = selected_node_ids.len();
 
     let setup_time = start.elapsed();
-    println!("Setup time: {:?}", setup_time);
+   
 
     let processing_start = Instant::now();
     let mut to_process: Vec<i32> = selected_node_ids.iter().cloned().collect();
@@ -320,20 +320,16 @@ fn add_parents(all_nodes: &HashMap<i32, Node>, child_to_parent: &HashMap<i32, i3
         }
     }
     let processing_time = processing_start.elapsed();
-    println!("Parent processing time: {:?}", processing_time);
-
+   
     let result_start = Instant::now();
     let result: Vec<Node> = selected_node_ids.iter()
         .filter_map(|node_id| all_nodes.get(node_id).cloned())
         .collect();
     let result_time = result_start.elapsed();
-    println!("Result collection time: {:?}", result_time);
-
-    println!("After: {}", result.len());
+   
     println!("Went from {} to {} nodes.", starting_size, result.len());
     
     let total_time = start.elapsed();
-    println!("Total execution time: {:?}", total_time);
     
     result
 }
