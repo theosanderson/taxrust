@@ -1,4 +1,4 @@
-use actix_web::{web, App, HttpServer, Responder, Result};
+use actix_web::{web, App, HttpServer, Responder, Result, get};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -73,6 +73,33 @@ struct AppState {
     nodes: Mutex<HashMap<i32, Node>>,
 }
 
+fn load_data(path: &Path) -> Result<(Metadata, HashMap<i32, Node>), Box<dyn Error>> {
+    let file = File::open(path)?;
+
+    let reader: Box<dyn BufRead> = if path.extension().and_then(|s| s.to_str()) == Some("gz") {
+        Box::new(io::BufReader::new(GzDecoder::new(file)))
+    } else {
+        Box::new(io::BufReader::new(file))
+    };
+
+    let mut lines = reader.lines();
+
+    // Read the first line separately as metadata
+    let metadata_line = lines.next().ok_or("Empty file")??;
+    let metadata: Metadata = serde_json::from_str(&metadata_line)?;
+
+    let mut nodes = HashMap::new();
+
+    // Process nodes
+    for line in lines {
+        let line = line?;
+        let node: Node = serde_json::from_str(&line)?;
+        nodes.insert(node.node_id, node);
+    }
+
+    Ok((metadata, nodes))
+}
+
 async fn get_node(data: web::Data<AppState>, node_id: web::Path<i32>) -> Result<impl Responder> {
     let nodes = data.nodes.lock().unwrap();
     if let Some(node) = nodes.get(&node_id) {
@@ -80,6 +107,11 @@ async fn get_node(data: web::Data<AppState>, node_id: web::Path<i32>) -> Result<
     } else {
         Err(actix_web::error::ErrorNotFound("Node not found"))
     }
+}
+
+#[get("/")]
+async fn index(data: web::Data<AppState>) -> String {
+    format!("Hello world!") // <- response with app_name
 }
 
 #[actix_web::main]
@@ -91,28 +123,8 @@ async fn main() -> std::io::Result<()> {
     }
 
     let path = Path::new(&args[1]);
-    let file = File::open(&path).expect("Failed to open file");
-
-    let reader: Box<dyn BufRead> = if path.extension().and_then(|s| s.to_str()) == Some("gz") {
-        Box::new(io::BufReader::new(GzDecoder::new(file)))
-    } else {
-        Box::new(io::BufReader::new(file))
-    };
-
-    let mut lines = reader.lines();
-
-    // Read the first line separately as metadata
-    let metadata_line = lines.next().expect("Empty file").expect("Failed to read metadata");
-    let _metadata: Metadata = serde_json::from_str(&metadata_line).expect("Failed to parse metadata");
-
-    let mut nodes = HashMap::new();
-
-    // Process nodes
-    for line in lines {
-        let line = line.expect("Failed to read line");
-        let node: Node = serde_json::from_str(&line).expect("Failed to parse node");
-        nodes.insert(node.node_id, node);
-    }
+    
+    let (metadata, nodes) = load_data(path).expect("Failed to load data");
 
     let app_state = web::Data::new(AppState {
         nodes: Mutex::new(nodes),
@@ -123,9 +135,12 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
+            .service(index)
+            
             .route("/node/{node_id}", web::get().to(get_node))
     })
-    .bind("127.0.0.1:8080")?
+    .disable_signals()
+    .bind(("127.0.0.1", 8080))?
     .run()
     .await
 }
