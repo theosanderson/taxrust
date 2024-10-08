@@ -76,7 +76,7 @@ struct GeneDetail {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-struct Node {
+struct InitialNode {
     name: String,
     x_dist: f64,
     y: f64,
@@ -89,12 +89,27 @@ struct Node {
     meta: HashMap<String, Value>,
 }
 
+#[derive(Clone, Debug)]
+struct Node {
+    name: String,
+    x_dist: f64,
+    y: f64,
+    mutations: Vec<i32>,
+    parent_id: i32,
+    node_id: i32,
+    num_tips: i32,
+    clades: HashMap<String, String>,
+    meta: Vec<i32>,
+}
+
 struct AppState {
     nodes: Vec<Node>,
     child_to_parent: HashMap<i32, i32>,
     config: Config,
     root_mutations: Vec<i32>,
     root_id: i32,
+    metadata_maps: Vec<HashMap<i32, String>>,
+    metadata_keys: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,10 +123,10 @@ struct NodesQuery {
 
 #[derive(Debug, Serialize)]
 struct NodesResponse {
-    nodes: Vec<Node>,
+    nodes: Vec<InitialNode>,
 }
 
-fn load_data(path: &Path) -> Result<(Metadata, Vec<Node>, HashMap<i32, i32>, Vec<i32>, i32), Box<dyn Error>> {
+fn load_data(path: &Path) -> Result<(Metadata, Vec<Node>, HashMap<i32, i32>, Vec<i32>, i32, Vec<HashMap<i32, String>>, Vec<String>), Box<dyn Error>> {
     let file = File::open(path)?;
 
     let reader: Box<dyn BufRead> = if path.extension().and_then(|s| s.to_str()) == Some("gz") {
@@ -131,10 +146,35 @@ fn load_data(path: &Path) -> Result<(Metadata, Vec<Node>, HashMap<i32, i32>, Vec
     let mut root_mutations = Vec::new();
     let mut root_id = 0;
 
+    let mut counter = 0;
+    let mut metadata_keys: Vec<String> = Vec::new();
+    let mut metadata_maps: Vec<HashMap<String, i32>> = Vec::new();
+
     // Process nodes
     for line in lines {
         let line = line?;
-        let mut node: Node = serde_json::from_str(&line)?;
+        let mut node: InitialNode = serde_json::from_str(&line)?;
+
+        if counter == 0 {
+            metadata_keys = node.meta.keys().cloned().collect();
+            metadata_maps = vec![HashMap::new(); metadata_keys.len()];
+        }
+
+        
+
+        
+
+        let mut meta: Vec<i32> = Vec::new();
+        for (i, key) in metadata_keys.iter().enumerate() {
+            if let Some(value) = node.meta.get(key) {
+                let value_str = value.to_string();
+                let len = metadata_maps[i].len() as i32;
+                let my_index = *metadata_maps[i].entry(value_str).or_insert(len);
+                meta.push(my_index);
+            } else {
+                meta.push(-1);
+            }
+        }
         
         if node.parent_id == node.node_id {
             // This is the root node
@@ -144,11 +184,32 @@ fn load_data(path: &Path) -> Result<(Metadata, Vec<Node>, HashMap<i32, i32>, Vec
         } else {
             child_to_parent.insert(node.node_id, node.parent_id);
         }
+
+        let node = Node {
+            name: node.name,
+            x_dist: node.x_dist,
+            y: node.y,
+            mutations: node.mutations,
+            parent_id: node.parent_id,
+            node_id: node.node_id,
+            num_tips: node.num_tips,
+            clades: node.clades,
+            meta,
+        };
         
         nodes.push(node);
+        counter += 1;
+        if(counter % 10000 == 0) {
+            println!("Processed {} nodes", counter);
+        }
     }
 
-    Ok((metadata, nodes, child_to_parent, root_mutations, root_id))
+    let metadata_maps: Vec<HashMap<i32, String>> = metadata_maps
+        .into_iter()
+        .map(|map| map.into_iter().map(|(k, v)| (v, k)).collect())
+        .collect();
+
+    Ok((metadata, nodes, child_to_parent, root_mutations, root_id, metadata_maps, metadata_keys))
 }
 
 fn scale_y_coordinates(nodes: &mut Vec<Node>) {
@@ -193,15 +254,6 @@ async fn get_config(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(&data.config)
 }
 
-#[get("/node/{node_id}")]
-async fn get_node(data: web::Data<AppState>, node_id: web::Path<i32>) -> Result<impl Responder> {
-    if let Some(node) = data.nodes.iter().find(|&n| n.node_id == *node_id) {
-        Ok(web::Json(node.clone()))
-    } else {
-        Err(actix_web::error::ErrorNotFound("Node not found"))
-    }
-}
-
 #[get("/")]
 async fn index(_data: web::Data<AppState>) -> String {
     "Hello world!".to_string()
@@ -215,7 +267,6 @@ async fn search(_data: web::Data<AppState>) -> impl Responder {
         "total_count": 0
     }))
 }
-
 #[get("/nodes/")]
 async fn get_nodes(
     data: web::Data<AppState>,
@@ -255,14 +306,36 @@ async fn get_nodes(
 
     let parents_start = Instant::now();
     let result = add_parents(&data.nodes, &data.child_to_parent, reduced_leaves);
-   
     let parents_time = parents_start.elapsed();
     println!("Time to add parents: {:?}", parents_time);
 
+    let conversion_start = Instant::now();
+    let result: Vec<InitialNode> = result.iter().map(|&idx| {
+        let node = &data.nodes[idx];
+        let mut meta: HashMap<String, Value> = HashMap::new();
+        for (i, key) in data.metadata_keys.iter().enumerate() {
+            if node.meta[i] != -1 {
+                meta.insert(key.clone(), serde_json::from_str(&data.metadata_maps[i][&node.meta[i]].clone()).unwrap());
+            }
+        }
+        InitialNode {
+            name: node.name.clone(),
+            x_dist: node.x_dist,
+            y: node.y,
+            mutations: node.mutations.clone(),
+            parent_id: node.parent_id,
+            node_id: node.node_id,
+            num_tips: node.num_tips,
+            clades: node.clades.clone(),
+            meta,
+        }
+    }).collect();
+    let conversion_time = conversion_start.elapsed();
+    println!("Time to convert nodes: {:?}", conversion_time);
+
     let total_time = start_time.elapsed();
     println!("Total time for /nodes/ endpoint: {:?}", total_time);
-    // return as real nodes not indexes
-    let result: Vec<Node> = result.iter().map(|&idx| data.nodes[idx].clone()).collect();
+
     HttpResponse::Ok().json(NodesResponse { nodes: result })
 }
 
@@ -333,6 +406,8 @@ fn add_parents(all_nodes: &[Node], child_to_parent: &HashMap<i32, i32>, filtered
     result
 }
 
+
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -343,16 +418,20 @@ async fn main() -> std::io::Result<()> {
 
     let path = Path::new(&args[1]);
     
-    let (mut metadata, mut nodes, child_to_parent, root_mutations, root_id) = load_data(path).expect("Failed to load data");
+    let (mut metadata, mut nodes, child_to_parent, root_mutations, root_id, metadata_maps, metadata_keys) = 
+        load_data(path).expect("Failed to load data");
 
     scale_y_coordinates(&mut nodes);
     update_config(&mut metadata.config, &nodes, &root_mutations, root_id, metadata.mutations.clone());
+    
     let app_state = web::Data::new(AppState {
         nodes,
         child_to_parent,
         config: metadata.config,
         root_mutations,
         root_id,
+        metadata_maps,
+        metadata_keys,
     });
 
     println!("Starting server at http://localhost:8080");
@@ -368,13 +447,12 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
             .app_data(app_state.clone())
             .service(index)
-            .service(get_node)
             .service(get_nodes)
             .service(get_config)
             .service(search)
     })
-    .bind(("127.0.0.1", 8080))?
     .disable_signals()
+    .bind(("127.0.0.1", 8080))?
     .run()
     .await
 }
